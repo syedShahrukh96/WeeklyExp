@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -23,6 +26,8 @@
 
 <script type="text/plain" id="app-source">
 const { useState, useEffect, useMemo } = React;
+
+const APP_VERSION = "1.1.0";
 
 /* ============================================================= *
  *  PASTE YOUR FIREBASE CONFIG BELOW to turn on cross-phone sync.
@@ -274,6 +279,7 @@ function NameScreen({roster,onJoin,local}){
         </div>
       </div>}
       {local && <div style={{marginTop:20,fontFamily:T.sans,fontSize:12,color:T.amber,textAlign:"center"}}>Local mode — works on this device now. Add Firebase keys in the file for cross-phone sync.</div>}
+      <div style={{marginTop:24,fontFamily:T.mono,fontSize:10,color:T.faint,textAlign:"center"}}>v{APP_VERSION}</div>
     </div>
   </div>;
 }
