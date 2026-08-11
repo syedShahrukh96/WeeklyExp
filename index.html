@@ -15,11 +15,11 @@
   html, body { margin:0; padding:0; background:#0E1013; }
   input { font-size:16px; }
 </style>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-app-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.7/babel.min.js"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -27,13 +27,8 @@
 <script type="text/plain" id="app-source">
 const { useState, useEffect, useMemo } = React;
 
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.3.1";
 
-/* ============================================================= *
- *  PASTE YOUR FIREBASE CONFIG BELOW to turn on cross-phone sync.
- *  Until you do, the app runs in local mode on this device.
- *  (Firebase console -> Project settings -> Your apps -> Web app)
- * ============================================================= */
 const firebaseConfig = {
   apiKey: "AIzaSyBaImgKdKXWSr8mwPLfsSkB-oTvCQz7Lls",
   authDomain: "weeklyexp-506e3.firebaseapp.com",
@@ -42,9 +37,8 @@ const firebaseConfig = {
   messagingSenderId: "976630617032",
   appId: "1:976630617032:web:e3206646c709d45be266fd",
 };
-/* ============================================================= */
 
-// ---------- data layer: cloud (Firebase) or local (this device) ----------
+// ---------- data layer ----------
 function makeFirebaseStore(cfg){
   firebase.initializeApp(cfg);
   const db = firebase.firestore();
@@ -55,6 +49,7 @@ function makeFirebaseStore(cfg){
     subscribeAll(cb){ return peopleCol.onSnapshot(s=>cb(s.docs.map(d=>({slug:d.id,...d.data()}))),()=>{}); },
     async getPerson(slug){ const d=await peopleCol.doc(slug).get(); return d.exists?d.data():null; },
     async setPerson(slug,data){ await peopleCol.doc(slug).set(data,{merge:true}); },
+    async replacePerson(slug,data){ await peopleCol.doc(slug).set(data); },
     async deletePerson(slug){ await peopleCol.doc(slug).delete(); },
     async getConfig(){ const d=await metaDoc.get(); return d.exists?d.data():null; },
     async setConfig(c){ await metaDoc.set(c,{merge:true}); },
@@ -72,6 +67,7 @@ function makeLocalStore(){
     subscribeAll(cb){ listeners.push(cb); cb(listFrom(read())); return ()=>{listeners=listeners.filter(f=>f!==cb);}; },
     async getPerson(slug){ return read().people[slug]||null; },
     async setPerson(slug,data){ const s=read(); s.people[slug]={...(s.people[slug]||{}),...data}; localStorage.setItem(KEY,JSON.stringify(s)); notify(); },
+    async replacePerson(slug,data){ const s=read(); s.people[slug]=data; localStorage.setItem(KEY,JSON.stringify(s)); notify(); },
     async deletePerson(slug){ const s=read(); delete s.people[slug]; localStorage.setItem(KEY,JSON.stringify(s)); notify(); },
     async getConfig(){ return read().config; },
     async setConfig(c){ const s=read(); s.config={...(s.config||{}),...c}; localStorage.setItem(KEY,JSON.stringify(s)); notify(); },
@@ -80,9 +76,22 @@ function makeLocalStore(){
 const usingPlaceholder = Object.values(firebaseConfig).some(v=>String(v).includes("PASTE_HERE"));
 let store;
 try { store = usingPlaceholder ? makeLocalStore() : makeFirebaseStore(firebaseConfig); }
-catch(e){ console.warn("Falling back to local mode:",e); store = makeLocalStore(); }
+catch(e){ console.warn("Local mode:",e); store = makeLocalStore(); }
 
-// ---------- design tokens ----------
+// ---------- pin hashing (casual privacy) ----------
+async function hashPin(slug, pin){
+  const msg = slug + "::" + pin;
+  try{
+    if(window.crypto && window.crypto.subtle){
+      const buf = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(msg));
+      return "s"+Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+    }
+  }catch(e){}
+  let h=5381; for(let i=0;i<msg.length;i++){ h=((h<<5)+h+msg.charCodeAt(i))>>>0; }
+  return "f"+h.toString(16);
+}
+
+// ---------- tokens ----------
 const T = {
   bg:"#0E1013", bgTop:"#141821", surface:"#191C22", surface2:"#22262F",
   line:"#2A2F3A", text:"#F4F5F7", muted:"#8B909C", faint:"#5C616D",
@@ -106,6 +115,7 @@ const daysInMonth = (k) => { const d=parseMonthKey(k); return new Date(d.getFull
 const weeksInMonth = (k) => Math.ceil(daysInMonth(k)/7);
 const catOf = (id) => CATEGORIES.find(c=>c.id===id) || CATEGORIES[CATEGORIES.length-1];
 const fmt = (n) => new Intl.NumberFormat("en-US",{maximumFractionDigits:0}).format(Math.round(n));
+const displayName = (p) => (p.locked && p.publicName) ? p.publicName : (p.locked ? "Hidden" : p.name);
 
 // =================================================================
 function App(){
@@ -119,6 +129,18 @@ function App(){
   const [week,setWeek] = useState(Math.min(Math.ceil(now.getDate()/7),6));
   const [showSettings,setShowSettings] = useState(false);
   const [showEveryone,setShowEveryone] = useState(false);
+  const [showPrivacy,setShowPrivacy] = useState(false);
+  const [pending,setPending] = useState(null); // {slug, person, name}
+  const [pinError,setPinError] = useState("");
+  const [showAdmin,setShowAdmin] = useState(false);
+
+  async function saveConfigMerge(patch){ const next=Object.assign({},config,patch); setConfig(next); await store.setConfig(next); }
+  // admin: reset a person's pins / privacy (does not reveal their data)
+  async function adminResetPerson(slug){
+    const p = await store.getPerson(slug); if(!p) return;
+    await store.setPerson(slug, {locked:false, pinHash:null, viewPinHash:null});
+  }
+  async function adminDeletePerson(slug){ await store.deletePerson(slug); if(slug===me){ localStorage.removeItem("wb-me"); setMe(null); setPerson(null); } }
 
   useEffect(()=>{
     const unsub = store.subscribeAll(list=>setAllPeople(list));
@@ -131,22 +153,45 @@ function App(){
     return ()=>{ if(unsub) unsub(); };
   },[]);
 
-  async function joinAs(name){
-    const slug = slugify(name); if(!slug) return;
-    let p = await store.getPerson(slug);
-    if(!p){ p = { name:name.trim(), data:{} }; await store.setPerson(slug,p); }
-    localStorage.setItem("wb-me", slug);
-    setMe(slug); setPerson(p);
-    setMKey(monthKey(new Date()));
-    setWeek(Math.min(Math.ceil(new Date().getDate()/7),6));
+  // keep signed-in person fresh from live data
+  useEffect(()=>{
+    if(!me) return;
+    const live = allPeople.find(p=>p.slug===me);
+    if(live) setPerson(prev => prev ? {...prev, name:live.name, publicName:live.publicName, locked:live.locked, pinHash:live.pinHash, viewPinHash:live.viewPinHash} : prev);
+  },[allPeople,me]);
+
+  function finalizeJoin(slug, p, name){
+    (async()=>{
+      let doc = p;
+      if(!doc){ doc = { name:name.trim(), publicName:"", locked:false, pinHash:null, viewPinHash:null, data:{} }; await store.setPerson(slug,doc); }
+      localStorage.setItem("wb-me", slug);
+      setMe(slug); setPerson(doc); setPending(null); setPinError("");
+      setMKey(monthKey(new Date())); setWeek(Math.min(Math.ceil(new Date().getDate()/7),6));
+    })();
   }
+  async function attemptJoinName(name){
+    const slug = slugify(name); if(!slug) return;
+    const p = await store.getPerson(slug);
+    if(p && p.locked){ setPinError(""); setPending({slug, person:p, name:p.name}); }
+    else finalizeJoin(slug, p, name);
+  }
+  async function attemptJoinSlug(slug){
+    const p = await store.getPerson(slug);
+    if(p && p.locked){ setPinError(""); setPending({slug, person:p, name:p.name}); }
+    else finalizeJoin(slug, p, p?p.name:slug);
+  }
+  async function submitJoinPin(pin){
+    if(!pending) return;
+    const h = await hashPin(pending.slug, pin);
+    if(h === pending.person.pinHash){ finalizeJoin(pending.slug, pending.person, pending.person.name); }
+    else setPinError("Wrong PIN. Try again.");
+  }
+
   function switchUser(){ localStorage.removeItem("wb-me"); setMe(null); setPerson(null); }
   async function deletePerson(slug){
     await store.deletePerson(slug);
     if(slug===me){ localStorage.removeItem("wb-me"); setMe(null); setPerson(null); }
   }
-
-  const roster = useMemo(()=>allPeople.map(p=>({slug:p.slug,name:p.name})),[allPeople]);
 
   const weekData = useMemo(()=>{
     if(!person) return {budget:config.defaultBudget, expenses:[]};
@@ -170,6 +215,8 @@ function App(){
   const removeExpense = (id)=>patchWeek({budget:weekData.budget, expenses:weekData.expenses.filter(e=>e.id!==id)});
   const setWeekBudget = (v)=>patchWeek({budget:v, expenses:weekData.expenses});
 
+  async function updateMeta(patch){ const next=Object.assign({},person,patch); await commitPerson(next); }
+
   function shiftMonth(dir){ const d=parseMonthKey(mKey); d.setMonth(d.getMonth()+dir);
     setMKey(monthKey(d)); setWeek(w=>Math.min(w,weeksInMonth(monthKey(d)))); }
   async function saveConfig(next){ setConfig(next); await store.setConfig(next); }
@@ -177,7 +224,13 @@ function App(){
   if(!ready) return <div style={Object.assign({},screenBase,{alignItems:"center",justifyContent:"center"})}>
     <div style={{color:T.muted,fontFamily:T.sans}}>Loading…</div></div>;
 
-  if(!me || !person) return <NameScreen roster={roster} onJoin={joinAs} local={store.mode==="local"} />;
+  if(pending) return <PinGate title={"Enter PIN for "+pending.name}
+    message="This person is private. Enter their PIN to open."
+    error={pinError} onCancel={()=>{setPending(null);setPinError("");}} onSubmit={submitJoinPin} />;
+
+  if(!me || !person) return <NameScreen people={allPeople} onJoinName={attemptJoinName} onJoinSlug={attemptJoinSlug} local={store.mode==="local"}
+    config={config} onOpenAdmin={()=>setShowAdmin(true)} adminSheet={showAdmin} onCloseAdmin={()=>setShowAdmin(false)}
+    onSaveAdminPin={h=>saveConfigMerge({adminHash:h})} onAdminReset={adminResetPerson} onAdminDelete={adminDeletePerson} />;
 
   const cur = config.currency;
   const md = parseMonthKey(mKey);
@@ -187,18 +240,19 @@ function App(){
   return (
     <div style={screenBase}>
       <div style={{maxWidth:440,margin:"0 auto",padding:"18px 18px 40px"}}>
-        {store.mode==="local" && <div style={{marginBottom:12,padding:"8px 12px",borderRadius:10,background:"rgba(251,191,36,0.12)",border:"1px solid "+T.amber,color:T.amber,fontFamily:T.sans,fontSize:12,textAlign:"center"}}>Local mode — add Firebase keys in the file to sync across phones.</div>}
+        {store.mode==="local" && <div style={{marginBottom:12,padding:"8px 12px",borderRadius:10,background:"rgba(251,191,36,0.12)",border:"1px solid "+T.amber,color:T.amber,fontFamily:T.sans,fontSize:12,textAlign:"center"}}>Local mode — add Firebase keys to sync.</div>}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <div style={{width:38,height:38,borderRadius:12,background:T.mint,color:T.bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:T.sans,fontWeight:800,fontSize:16}}>{person.name.slice(0,1).toUpperCase()}</div>
             <div>
-              <div style={{fontFamily:T.sans,fontSize:15,fontWeight:700,color:T.text}}>{person.name}</div>
+              <div style={{fontFamily:T.sans,fontSize:15,fontWeight:700,color:T.text,display:"flex",alignItems:"center",gap:6}}>{person.name} {person.locked && <span title="Private" style={{fontSize:12}}>🔒</span>}</div>
               <button onClick={switchUser} style={{background:"none",border:"none",padding:0,color:T.faint,fontFamily:T.sans,fontSize:12,cursor:"pointer"}}>Switch person</button>
             </div>
           </div>
           <div style={{display:"flex",gap:8}}>
-            <button onClick={()=>setShowEveryone(true)} style={gearBtn}>👥</button>
-            <button onClick={()=>setShowSettings(true)} style={gearBtn}>⚙</button>
+            <button onClick={()=>setShowPrivacy(true)} style={gearBtn} title="Privacy & PIN">🔒</button>
+            <button onClick={()=>setShowEveryone(true)} style={gearBtn} title="Everyone">👥</button>
+            <button onClick={()=>setShowSettings(true)} style={gearBtn} title="Settings">⚙</button>
           </div>
         </div>
 
@@ -254,76 +308,326 @@ function App(){
         </div>
 
         <MonthOverview person={person} mKey={mKey} nWeeks={nWeeks} cur={cur} defaultBudget={config.defaultBudget} onJump={setWeek} selected={week} />
+        <div style={{marginTop:20,fontFamily:T.mono,fontSize:10,color:T.faint,textAlign:"center"}}>v{APP_VERSION}</div>
       </div>
 
       {showSettings && <Settings config={config} onClose={()=>setShowSettings(false)} onCurrency={c=>saveConfig(Object.assign({},config,{currency:c}))} onDefault={v=>saveConfig(Object.assign({},config,{defaultBudget:v}))} />}
+      {showPrivacy && <PrivacySheet person={person} onClose={()=>setShowPrivacy(false)} onUpdate={updateMeta} onDeleteMe={()=>{ setShowPrivacy(false); deletePerson(me); }} />}
       {showEveryone && <EveryoneSheet people={allPeople} mKey={mKey} week={week} cur={cur} defaultBudget={config.defaultBudget} meSlug={me} onDelete={deletePerson} onClose={()=>setShowEveryone(false)} />}
     </div>
   );
 }
 
-function NameScreen({roster,onJoin,local}){
-  const [name,setName]=useState("");
+// ---------- pin gate (full screen) ----------
+function PinGate({title,message,error,onCancel,onSubmit}){
+  const [pin,setPin]=useState("");
   return <div style={Object.assign({},screenBase,{alignItems:"center",justifyContent:"center",padding:24})}>
-    <div style={{width:"100%",maxWidth:380}}>
-      <div style={{fontFamily:T.sans,fontSize:13,letterSpacing:2,color:T.faint,textTransform:"uppercase",fontWeight:600,textAlign:"center"}}>Weekly Budget</div>
-      <div style={{fontFamily:T.sans,fontSize:26,fontWeight:800,color:T.text,textAlign:"center",marginTop:8}}>What's your name?</div>
-      <div style={{fontFamily:T.sans,fontSize:14,color:T.muted,textAlign:"center",marginTop:8,lineHeight:1.5}}>Enter your name to track your own weekly spending. Everyone keeps their own separate list.</div>
-      <input autoFocus placeholder="Your name" value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")onJoin(name);}}
-        style={{width:"100%",boxSizing:"border-box",marginTop:22,padding:"14px 16px",background:T.surface,border:"1px solid "+T.line,borderRadius:14,color:T.text,fontFamily:T.sans,fontSize:17,outline:"none",textAlign:"center"}} />
-      <button onClick={()=>onJoin(name)} disabled={!name.trim()} style={{width:"100%",marginTop:12,padding:14,borderRadius:14,border:"none",background:name.trim()?T.mint:T.surface2,color:name.trim()?T.bg:T.faint,fontFamily:T.sans,fontSize:16,fontWeight:700,cursor:name.trim()?"pointer":"default"}}>Continue</button>
-      {roster.length>0 && <div style={{marginTop:26}}>
-        <div style={{fontFamily:T.sans,fontSize:12,color:T.faint,textAlign:"center",marginBottom:10}}>Or tap your name if you're rejoining</div>
-        <div style={{display:"flex",flexWrap:"wrap",gap:8,justifyContent:"center"}}>
-          {roster.map(r=><button key={r.slug} onClick={()=>onJoin(r.name)} style={{padding:"8px 14px",borderRadius:999,border:"1px solid "+T.line,background:T.surface,color:T.text,fontFamily:T.sans,fontSize:14,fontWeight:600,cursor:"pointer"}}>{r.name}</button>)}
-        </div>
-      </div>}
-      {local && <div style={{marginTop:20,fontFamily:T.sans,fontSize:12,color:T.amber,textAlign:"center"}}>Local mode — works on this device now. Add Firebase keys in the file for cross-phone sync.</div>}
-      <div style={{marginTop:24,fontFamily:T.mono,fontSize:10,color:T.faint,textAlign:"center"}}>v{APP_VERSION}</div>
+    <div style={{width:"100%",maxWidth:340,textAlign:"center"}}>
+      <div style={{fontSize:34,marginBottom:8}}>🔒</div>
+      <div style={{fontFamily:T.sans,fontSize:20,fontWeight:800,color:T.text}}>{title}</div>
+      <div style={{fontFamily:T.sans,fontSize:14,color:T.muted,marginTop:8}}>{message}</div>
+      <input autoFocus type="password" inputMode="numeric" maxLength={6} placeholder="● ● ● ● ● ●" value={pin}
+        onChange={e=>setPin(e.target.value.replace(/[^0-9]/g,""))}
+        onKeyDown={e=>{if(e.key==="Enter"&&pin.length===6)onSubmit(pin);}}
+        style={{width:"100%",boxSizing:"border-box",marginTop:20,padding:"14px",background:T.surface,border:"1px solid "+(error?T.rose:T.line),borderRadius:14,color:T.text,fontFamily:T.mono,fontSize:24,letterSpacing:8,textAlign:"center",outline:"none"}} />
+      {error && <div style={{color:T.rose,fontFamily:T.sans,fontSize:13,marginTop:8}}>{error}</div>}
+      <button onClick={()=>pin.length===6&&onSubmit(pin)} disabled={pin.length!==6} style={{width:"100%",marginTop:14,padding:14,borderRadius:14,border:"none",background:pin.length===6?T.mint:T.surface2,color:pin.length===6?T.bg:T.faint,fontFamily:T.sans,fontSize:16,fontWeight:700,cursor:pin.length===6?"pointer":"default"}}>Unlock</button>
+      <button onClick={onCancel} style={{width:"100%",marginTop:10,padding:12,borderRadius:14,border:"none",background:"transparent",color:T.muted,fontFamily:T.sans,fontSize:14,cursor:"pointer"}}>Back</button>
     </div>
   </div>;
 }
 
+// ---------- inline pin modal (for reveal in Everyone) ----------
+function PinModal({title,message,error,onCancel,onSubmit}){
+  const [pin,setPin]=useState("");
+  return <div onClick={onCancel} style={Object.assign({},sheetWrap,{alignItems:"center"})}>
+    <div onClick={e=>e.stopPropagation()} style={{width:"100%",maxWidth:340,background:T.surface,borderRadius:20,border:"1px solid "+T.line,padding:22,textAlign:"center"}}>
+      <div style={{fontFamily:T.sans,fontSize:17,fontWeight:700,color:T.text}}>{title}</div>
+      {message && <div style={{fontFamily:T.sans,fontSize:13,color:T.muted,marginTop:6}}>{message}</div>}
+      <input autoFocus type="password" inputMode="numeric" maxLength={6} placeholder="● ● ● ● ● ●" value={pin}
+        onChange={e=>setPin(e.target.value.replace(/[^0-9]/g,""))}
+        onKeyDown={e=>{if(e.key==="Enter"&&pin.length===6)onSubmit(pin);}}
+        style={{width:"100%",boxSizing:"border-box",marginTop:16,padding:"12px",background:T.surface2,border:"1px solid "+(error?T.rose:T.line),borderRadius:12,color:T.text,fontFamily:T.mono,fontSize:22,letterSpacing:6,textAlign:"center",outline:"none"}} />
+      {error && <div style={{color:T.rose,fontFamily:T.sans,fontSize:12,marginTop:6}}>{error}</div>}
+      <div style={{display:"flex",gap:8,marginTop:14}}>
+        <button onClick={onCancel} style={{flex:1,padding:12,borderRadius:12,border:"1px solid "+T.line,background:"transparent",color:T.muted,fontFamily:T.sans,fontSize:14,fontWeight:600,cursor:"pointer"}}>Cancel</button>
+        <button onClick={()=>pin.length===6&&onSubmit(pin)} disabled={pin.length!==6} style={{flex:1,padding:12,borderRadius:12,border:"none",background:pin.length===6?T.mint:T.surface2,color:pin.length===6?T.bg:T.faint,fontFamily:T.sans,fontSize:14,fontWeight:700,cursor:pin.length===6?"pointer":"default"}}>OK</button>
+      </div>
+    </div>
+  </div>;
+}
+
+// ---------- privacy / pin management ----------
+function PrivacySheet({person,onClose,onUpdate,onDeleteMe}){
+  const [view,setView]=useState("home"); // home | setpin | changepin | viewpin | delete
+  const [p1,setP1]=useState(""); const [p2,setP2]=useState(""); const [pub,setPub]=useState(person.publicName||""); const [msg,setMsg]=useState("");
+
+  async function enablePin(){
+    if(p1.length!==6){ setMsg("PIN must be 6 digits."); return; }
+    if(p1!==p2){ setMsg("PINs don't match."); return; }
+    const h=await hashPin(slugify(person.name), p1);
+    await onUpdate({locked:true, pinHash:h, publicName: pub.trim()});
+    setP1("");setP2("");setMsg(""); setView("home");
+  }
+  async function changePin(){
+    if(p1.length!==6){ setMsg("PIN must be 6 digits."); return; }
+    if(p1!==p2){ setMsg("PINs don't match."); return; }
+    const h=await hashPin(slugify(person.name), p1);
+    await onUpdate({pinHash:h}); setP1("");setP2("");setMsg(""); setView("home");
+  }
+  async function setViewPin(){
+    if(p1 && p1.length!==6){ setMsg("PIN must be 6 digits."); return; }
+    const h = p1 ? await hashPin(slugify(person.name), p1) : null;
+    await onUpdate({viewPinHash:h}); setP1("");setMsg(""); setView("home");
+  }
+  async function savePublic(){ await onUpdate({publicName:pub.trim()}); setMsg("Saved."); }
+  async function turnOff(){ await onUpdate({locked:false, pinHash:null, viewPinHash:null}); setView("home"); }
+
+  return <div onClick={onClose} style={sheetWrap}><div onClick={e=>e.stopPropagation()} style={sheetBody}>
+    <div style={grab}/>
+    <div style={{fontFamily:T.sans,fontSize:18,fontWeight:700,color:T.text,marginBottom:4}}>Privacy & PIN</div>
+    <div style={{fontFamily:T.sans,fontSize:12,color:T.faint,marginBottom:18}}>Casual privacy only — hides you from friends in the app, not from a determined hacker.</div>
+
+    {view==="home" && <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      <div style={{padding:"12px 14px",borderRadius:12,background:T.surface2,fontFamily:T.sans,fontSize:14,color:T.text}}>
+        Status: {person.locked ? <b style={{color:T.mint}}>Private 🔒</b> : <b style={{color:T.amber}}>Open (anyone can see/edit)</b>}
+      </div>
+      {!person.locked ?
+        <PrivRow label="Set a 6-digit PIN (make private)" onClick={()=>{setView("setpin");setMsg("");}} /> :
+        <>
+          <PrivRow label="Change PIN" onClick={()=>{setView("changepin");setMsg("");}} />
+          <PrivRow label="View-only PIN for friends" sub="Lets a friend see (not edit) your details" onClick={()=>{setView("viewpin");setMsg("");}} />
+          <div>
+            <div style={{fontFamily:T.sans,fontSize:12,color:T.muted,margin:"6px 0"}}>Public name (shown to others)</div>
+            <div style={{display:"flex",gap:8}}>
+              <input value={pub} onChange={e=>setPub(e.target.value)} placeholder="e.g. NameHidden" style={{flex:1,boxSizing:"border-box",padding:"11px 12px",background:T.surface2,border:"1px solid "+T.line,borderRadius:12,color:T.text,fontFamily:T.sans,fontSize:15,outline:"none"}} />
+              <button onClick={savePublic} style={{padding:"0 16px",borderRadius:12,border:"none",background:T.mint,color:T.bg,fontFamily:T.sans,fontSize:14,fontWeight:700,cursor:"pointer"}}>Save</button>
+            </div>
+          </div>
+          <PrivRow label="Turn off privacy" danger onClick={turnOff} />
+        </>
+      }
+      <PrivRow label="Delete everything (my account)" danger onClick={()=>{setView("delete");setMsg("");}} />
+      {msg && <div style={{color:T.mint,fontFamily:T.sans,fontSize:13}}>{msg}</div>}
+      <button onClick={onClose} style={doneBtn}>Done</button>
+    </div>}
+
+    {(view==="setpin"||view==="changepin") && <div>
+      <div style={{fontFamily:T.sans,fontSize:15,fontWeight:700,color:T.text,marginBottom:12}}>{view==="setpin"?"Create your PIN":"Change your PIN"}</div>
+      <PinField label="New 6-digit PIN" value={p1} onChange={setP1} />
+      <PinField label="Repeat PIN" value={p2} onChange={setP2} />
+      {msg && <div style={{color:T.rose,fontFamily:T.sans,fontSize:13,marginTop:6}}>{msg}</div>}
+      {view==="setpin" && <>
+        <div style={{fontFamily:T.sans,fontSize:12,color:T.muted,marginTop:12,marginBottom:4}}>Public name shown to others (optional)</div>
+        <input value={pub} onChange={e=>setPub(e.target.value)} placeholder="e.g. NameHidden" style={{width:"100%",boxSizing:"border-box",padding:"11px 12px",background:T.surface2,border:"1px solid "+T.line,borderRadius:12,color:T.text,fontFamily:T.sans,fontSize:15,outline:"none"}} />
+      </>}
+      <div style={{display:"flex",gap:8,marginTop:16}}>
+        <button onClick={()=>{setView("home");setMsg("");setP1("");setP2("");}} style={ghostBtn}>Back</button>
+        <button onClick={view==="setpin"?enablePin:changePin} style={primaryBtn}>Save PIN</button>
+      </div>
+    </div>}
+
+    {view==="viewpin" && <div>
+      <div style={{fontFamily:T.sans,fontSize:15,fontWeight:700,color:T.text,marginBottom:6}}>View-only PIN</div>
+      <div style={{fontFamily:T.sans,fontSize:13,color:T.muted,marginBottom:12}}>Share this PIN with a friend so they can SEE your expenses but not edit or delete. Leave blank and save to remove it.</div>
+      <PinField label="View-only PIN (or blank to clear)" value={p1} onChange={setP1} />
+      {msg && <div style={{color:T.rose,fontFamily:T.sans,fontSize:13,marginTop:6}}>{msg}</div>}
+      <div style={{display:"flex",gap:8,marginTop:16}}>
+        <button onClick={()=>{setView("home");setMsg("");setP1("");}} style={ghostBtn}>Back</button>
+        <button onClick={setViewPin} style={primaryBtn}>Save</button>
+      </div>
+    </div>}
+
+    {view==="delete" && <div>
+      <div style={{fontFamily:T.sans,fontSize:15,fontWeight:700,color:T.rose,marginBottom:6}}>Delete everything</div>
+      <div style={{fontFamily:T.sans,fontSize:13,color:T.muted,marginBottom:16}}>This permanently removes your name and all your expenses. This can't be undone.</div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={()=>setView("home")} style={ghostBtn}>Cancel</button>
+        <button onClick={onDeleteMe} style={{flex:1,padding:12,borderRadius:12,border:"none",background:T.rose,color:T.bg,fontFamily:T.sans,fontSize:14,fontWeight:700,cursor:"pointer"}}>Delete forever</button>
+      </div>
+    </div>}
+  </div></div>;
+}
+function PrivRow({label,sub,onClick,danger}){
+  return <button onClick={onClick} style={{textAlign:"left",padding:"12px 14px",borderRadius:12,border:"1px solid "+T.line,background:T.surface,cursor:"pointer"}}>
+    <div style={{fontFamily:T.sans,fontSize:14,fontWeight:600,color:danger?T.rose:T.text}}>{label}</div>
+    {sub && <div style={{fontFamily:T.sans,fontSize:12,color:T.faint,marginTop:2}}>{sub}</div>}
+  </button>;
+}
+function PinField({label,value,onChange}){
+  return <div style={{marginTop:10}}>
+    <div style={{fontFamily:T.sans,fontSize:12,color:T.muted,marginBottom:4}}>{label}</div>
+    <input type="password" inputMode="numeric" maxLength={6} value={value} onChange={e=>onChange(e.target.value.replace(/[^0-9]/g,""))}
+      style={{width:"100%",boxSizing:"border-box",padding:"12px",background:T.surface2,border:"1px solid "+T.line,borderRadius:12,color:T.text,fontFamily:T.mono,fontSize:20,letterSpacing:6,textAlign:"center",outline:"none"}} />
+  </div>;
+}
+
+// ---------- everyone ----------
 function EveryoneSheet({people,mKey,week,cur,defaultBudget,meSlug,onDelete,onClose}){
   const [confirmSlug,setConfirmSlug]=useState(null);
+  const [revealed,setRevealed]=useState({}); // slug -> 'primary'|'view'
+  const [unlockSlug,setUnlockSlug]=useState(null);
+  const [pinErr,setPinErr]=useState("");
+
+  function levelFor(p){
+    if(!p.locked) return "primary";      // open: full
+    if(p.slug===meSlug) return "primary"; // yourself
+    return revealed[p.slug] || null;
+  }
+  async function tryUnlock(pin){
+    const p = people.find(x=>x.slug===unlockSlug); if(!p) return;
+    const h = await hashPin(p.slug, pin);
+    if(h===p.pinHash){ setRevealed(r=>({...r,[p.slug]:"primary"})); setUnlockSlug(null); setPinErr(""); }
+    else if(p.viewPinHash && h===p.viewPinHash){ setRevealed(r=>({...r,[p.slug]:"view"})); setUnlockSlug(null); setPinErr(""); }
+    else setPinErr("Wrong PIN.");
+  }
+
   const rows = people.map(p=>{
     const w = p.data && p.data[mKey] && p.data[mKey][week];
     const budget = (w&&w.budget!=null)?w.budget:defaultBudget;
     const spent = ((w&&w.expenses)||[]).reduce((s,e)=>s+e.amount,0);
     let mSpent=0; const mm=(p.data&&p.data[mKey])||{};
     Object.keys(mm).forEach(k=>{((mm[k].expenses)||[]).forEach(e=>mSpent+=e.amount);});
-    return {slug:p.slug,name:p.name,budget,spent,mSpent};
-  }).sort((a,b)=>b.spent-a.spent);
+    return {slug:p.slug,name:p.name,locked:!!p.locked,publicName:p.publicName,pinHash:p.pinHash,viewPinHash:p.viewPinHash,budget,spent,mSpent,data:p.data};
+  });
+  rows.sort((a,b)=>b.spent-a.spent);
+
   return <div onClick={onClose} style={sheetWrap}><div onClick={e=>e.stopPropagation()} style={sheetBody}>
     <div style={grab}/>
     <div style={{fontFamily:T.sans,fontSize:18,fontWeight:700,color:T.text,marginBottom:4}}>Everyone · Week {week}</div>
     <div style={{fontFamily:T.sans,fontSize:13,color:T.faint,marginBottom:18}}>{MONTHS[parseMonthKey(mKey).getMonth()]} {parseMonthKey(mKey).getFullYear()}</div>
     {rows.length===0 ? <div style={{color:T.faint,fontFamily:T.sans,padding:20,textAlign:"center"}}>No one has joined yet.</div> :
-    <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:"50vh",overflowY:"auto"}}>
-      {rows.map(r=>{ const rem=r.budget-r.spent; const frac=r.budget>0?Math.min(r.spent/r.budget,1):0; const over=r.spent>r.budget; const bar=over?T.rose:(frac>=0.8?T.amber:T.mint);
+    <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:"55vh",overflowY:"auto"}}>
+      {rows.map(r=>{
+        const level = (!r.locked||r.slug===meSlug) ? "primary" : (revealed[r.slug]||null);
+        const shown = !!level;
+        const rem=r.budget-r.spent; const frac=r.budget>0?Math.min(r.spent/r.budget,1):0; const over=r.spent>r.budget; const bar=over?T.rose:(frac>=0.8?T.amber:T.mint);
+        const canDelete = level==="primary";
+        const label = shown ? (r.name + (r.slug===meSlug?" (you)":"")) : (r.publicName||"Hidden");
         return <div key={r.slug} style={{background:r.slug===meSlug?T.surface2:T.surface,border:"1px solid "+(r.slug===meSlug?T.mint:"transparent"),borderRadius:14,padding:"12px 14px"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,gap:8}}>
-            <span style={{fontFamily:T.sans,fontSize:14,fontWeight:700,color:T.text}}>{r.name}{r.slug===meSlug?" (you)":""}</span>
+            <span style={{fontFamily:T.sans,fontSize:14,fontWeight:700,color:T.text,display:"flex",alignItems:"center",gap:6}}>{label} {r.locked && <span style={{fontSize:11}}>🔒</span>}</span>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontFamily:T.mono,fontSize:13,color:over?T.rose:T.mint}}>{rem<0?"-":""}{cur}{fmt(Math.abs(rem))} left</span>
-              <button onClick={()=>setConfirmSlug(r.slug)} title="Remove person" style={{width:26,height:26,borderRadius:8,border:"none",background:T.surface2,color:T.faint,fontSize:14,lineHeight:"1",cursor:"pointer",flexShrink:0}}>🗑</button>
+              {shown ? <span style={{fontFamily:T.mono,fontSize:13,color:over?T.rose:T.mint}}>{rem<0?"-":""}{cur}{fmt(Math.abs(rem))} left</span>
+                     : <button onClick={()=>{setUnlockSlug(r.slug);setPinErr("");}} style={{padding:"5px 12px",borderRadius:999,border:"1px solid "+T.line,background:"transparent",color:T.mint,fontFamily:T.sans,fontSize:12,fontWeight:700,cursor:"pointer"}}>Enter PIN</button>}
+              {canDelete && <button onClick={()=>setConfirmSlug(r.slug)} title="Remove" style={{width:26,height:26,borderRadius:8,border:"none",background:T.surface2,color:T.faint,fontSize:14,lineHeight:"1",cursor:"pointer",flexShrink:0}}>🗑</button>}
             </div>
           </div>
-          <div style={{height:6,background:T.surface2,borderRadius:999,overflow:"hidden"}}><div style={{width:(frac*100)+"%",height:"100%",background:bar,borderRadius:999}}/></div>
-          <div style={{display:"flex",justifyContent:"space-between",marginTop:6}}>
-            <span style={{fontFamily:T.mono,fontSize:11,color:T.faint}}>Week: {cur}{fmt(r.spent)} / {cur}{fmt(r.budget)}</span>
-            <span style={{fontFamily:T.mono,fontSize:11,color:T.faint}}>Month: {cur}{fmt(r.mSpent)}</span>
-          </div>
+          {shown ? <>
+            <div style={{height:6,background:T.surface2,borderRadius:999,overflow:"hidden"}}><div style={{width:(frac*100)+"%",height:"100%",background:bar,borderRadius:999}}/></div>
+            <div style={{display:"flex",justifyContent:"space-between",marginTop:6}}>
+              <span style={{fontFamily:T.mono,fontSize:11,color:T.faint}}>Week: {cur}{fmt(r.spent)} / {cur}{fmt(r.budget)}</span>
+              <span style={{fontFamily:T.mono,fontSize:11,color:T.faint}}>Month: {cur}{fmt(r.mSpent)}</span>
+            </div>
+            {level==="view" && <div style={{fontFamily:T.sans,fontSize:11,color:T.faint,marginTop:6}}>View-only — you can see but not edit or delete.</div>}
+          </> : <div style={{fontFamily:T.sans,fontSize:12,color:T.faint}}>Private. Enter this person's PIN to view.</div>}
+
           {confirmSlug===r.slug && <div style={{marginTop:10,padding:"10px 12px",borderRadius:10,background:"rgba(251,113,133,0.10)",border:"1px solid "+T.rose}}>
-            <div style={{fontFamily:T.sans,fontSize:13,color:T.text,marginBottom:8}}>Delete <b>{r.name}</b> and all their expenses? This can't be undone.</div>
+            <div style={{fontFamily:T.sans,fontSize:13,color:T.text,marginBottom:8}}>Delete <b>{r.name}</b> and all their expenses? Can't be undone.</div>
             <div style={{display:"flex",gap:8}}>
               <button onClick={()=>setConfirmSlug(null)} style={{flex:1,padding:9,borderRadius:9,border:"1px solid "+T.line,background:"transparent",color:T.muted,fontFamily:T.sans,fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
-              <button onClick={()=>{ onDelete(r.slug); setConfirmSlug(null); }} style={{flex:1,padding:9,borderRadius:9,border:"none",background:T.rose,color:T.bg,fontFamily:T.sans,fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete</button>
+              <button onClick={()=>{onDelete(r.slug);setConfirmSlug(null);}} style={{flex:1,padding:9,borderRadius:9,border:"none",background:T.rose,color:T.bg,fontFamily:T.sans,fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete</button>
             </div>
           </div>}
         </div>;})}
     </div>}
     <button onClick={onClose} style={doneBtn}>Done</button>
+
+    {unlockSlug && <PinModal title="Enter PIN" message="Enter this person's PIN to view their expenses." error={pinErr}
+      onCancel={()=>{setUnlockSlug(null);setPinErr("");}} onSubmit={tryUnlock} />}
+  </div></div>;
+}
+
+// ---------- leaf UI ----------
+function NameScreen({people,onJoinName,onJoinSlug,local,config,onOpenAdmin,adminSheet,onCloseAdmin,onSaveAdminPin,onAdminReset,onAdminDelete}){
+  const [name,setName]=useState("");
+  return <div style={Object.assign({},screenBase,{alignItems:"center",justifyContent:"center",padding:24})}>
+    <div style={{width:"100%",maxWidth:380}}>
+      <div style={{fontFamily:T.sans,fontSize:13,letterSpacing:2,color:T.faint,textTransform:"uppercase",fontWeight:600,textAlign:"center"}}>Weekly Budget</div>
+      <div style={{fontFamily:T.sans,fontSize:26,fontWeight:800,color:T.text,textAlign:"center",marginTop:8}}>What's your name?</div>
+      <div style={{fontFamily:T.sans,fontSize:14,color:T.muted,textAlign:"center",marginTop:8,lineHeight:1.5}}>Enter your name to track your own weekly spending. Everyone keeps their own separate list.</div>
+      <input autoFocus placeholder="Your name" value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")onJoinName(name);}}
+        style={{width:"100%",boxSizing:"border-box",marginTop:22,padding:"14px 16px",background:T.surface,border:"1px solid "+T.line,borderRadius:14,color:T.text,fontFamily:T.sans,fontSize:17,outline:"none",textAlign:"center"}} />
+      <button onClick={()=>onJoinName(name)} disabled={!name.trim()} style={{width:"100%",marginTop:12,padding:14,borderRadius:14,border:"none",background:name.trim()?T.mint:T.surface2,color:name.trim()?T.bg:T.faint,fontFamily:T.sans,fontSize:16,fontWeight:700,cursor:name.trim()?"pointer":"default"}}>Continue</button>
+      {people.length>0 && <div style={{marginTop:26}}>
+        <div style={{fontFamily:T.sans,fontSize:12,color:T.faint,textAlign:"center",marginBottom:10}}>Or tap your name if you're rejoining</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:8,justifyContent:"center"}}>
+          {people.map(p=><button key={p.slug} onClick={()=>onJoinSlug(p.slug)} style={{padding:"8px 14px",borderRadius:999,border:"1px solid "+T.line,background:T.surface,color:T.text,fontFamily:T.sans,fontSize:14,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>{displayName(p)} {p.locked && <span style={{fontSize:11}}>🔒</span>}</button>)}
+        </div>
+      </div>}
+      {local && <div style={{marginTop:20,fontFamily:T.sans,fontSize:12,color:T.amber,textAlign:"center"}}>Local mode — add Firebase keys for sync.</div>}
+      <div style={{marginTop:22,textAlign:"center"}}>
+        <button onClick={onOpenAdmin} style={{background:"none",border:"none",color:T.faint,fontFamily:T.sans,fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Admin · reset a forgotten PIN</button>
+      </div>
+      <div style={{marginTop:16,fontFamily:T.mono,fontSize:10,color:T.faint,textAlign:"center"}}>v{APP_VERSION}</div>
+    </div>
+    {adminSheet && <AdminSheet people={people} config={config} onClose={onCloseAdmin} onSaveAdminPin={onSaveAdminPin} onReset={onAdminReset} onDelete={onAdminDelete} />}
+  </div>;
+}
+
+function AdminSheet({people,config,onClose,onSaveAdminPin,onReset,onDelete}){
+  const hasAdmin = !!config.adminHash;
+  const [authed,setAuthed]=useState(false);
+  const [view,setView]=useState(hasAdmin?"login":"setup"); // login | setup | list
+  const [p1,setP1]=useState(""); const [p2,setP2]=useState(""); const [err,setErr]=useState("");
+  const [confirm,setConfirm]=useState(null);
+
+  async function doSetup(){
+    if(p1.length!==6){ setErr("Master PIN must be 6 digits."); return; }
+    if(p1!==p2){ setErr("PINs don't match."); return; }
+    const h=await hashPin("__admin__", p1);
+    await onSaveAdminPin(h); setAuthed(true); setView("list"); setErr(""); setP1("");setP2("");
+  }
+  async function doLogin(){
+    const h=await hashPin("__admin__", p1);
+    if(h===config.adminHash){ setAuthed(true); setView("list"); setErr(""); setP1(""); }
+    else setErr("Wrong master PIN.");
+  }
+
+  return <div onClick={onClose} style={sheetWrap}><div onClick={e=>e.stopPropagation()} style={sheetBody}>
+    <div style={grab}/>
+    <div style={{fontFamily:T.sans,fontSize:18,fontWeight:700,color:T.text,marginBottom:4}}>Admin</div>
+    <div style={{fontFamily:T.sans,fontSize:12,color:T.faint,marginBottom:18}}>Reset a forgotten PIN or remove someone. Can't view private expenses.</div>
+
+    {view==="setup" && <div>
+      <div style={{fontFamily:T.sans,fontSize:14,color:T.text,marginBottom:12}}>No master PIN yet. Create one — keep it safe, it can reset anyone's PIN.</div>
+      <PinField label="Master PIN (6 digits)" value={p1} onChange={setP1} />
+      <PinField label="Repeat master PIN" value={p2} onChange={setP2} />
+      {err && <div style={{color:T.rose,fontFamily:T.sans,fontSize:13,marginTop:6}}>{err}</div>}
+      <div style={{display:"flex",gap:8,marginTop:16}}>
+        <button onClick={onClose} style={ghostBtn}>Cancel</button>
+        <button onClick={doSetup} style={primaryBtn}>Create master PIN</button>
+      </div>
+    </div>}
+
+    {view==="login" && <div>
+      <PinField label="Enter master PIN" value={p1} onChange={setP1} />
+      {err && <div style={{color:T.rose,fontFamily:T.sans,fontSize:13,marginTop:6}}>{err}</div>}
+      <div style={{display:"flex",gap:8,marginTop:16}}>
+        <button onClick={onClose} style={ghostBtn}>Cancel</button>
+        <button onClick={doLogin} style={primaryBtn}>Unlock admin</button>
+      </div>
+    </div>}
+
+    {view==="list" && authed && <div>
+      <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:"52vh",overflowY:"auto"}}>
+        {people.length===0 ? <div style={{color:T.faint,fontFamily:T.sans,padding:16,textAlign:"center"}}>No people yet.</div> :
+          people.map(p=><div key={p.slug} style={{background:T.surface,border:"1px solid "+T.line,borderRadius:14,padding:"12px 14px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontFamily:T.sans,fontSize:14,fontWeight:700,color:T.text,display:"flex",alignItems:"center",gap:6}}>{p.name} {p.locked?<span style={{fontSize:11}}>🔒</span>:<span style={{fontFamily:T.sans,fontSize:11,color:T.faint}}>open</span>}</span>
+            </div>
+            {confirm===p.slug ? <div style={{marginTop:10,display:"flex",gap:8}}>
+              <button onClick={()=>setConfirm(null)} style={{flex:1,padding:9,borderRadius:9,border:"1px solid "+T.line,background:"transparent",color:T.muted,fontFamily:T.sans,fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
+              <button onClick={()=>{onDelete(p.slug);setConfirm(null);}} style={{flex:1,padding:9,borderRadius:9,border:"none",background:T.rose,color:T.bg,fontFamily:T.sans,fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete forever</button>
+            </div> : <div style={{marginTop:10,display:"flex",gap:8}}>
+              <button onClick={()=>onReset(p.slug)} disabled={!p.locked} style={{flex:1,padding:9,borderRadius:9,border:"1px solid "+T.line,background:"transparent",color:p.locked?T.mint:T.faint,fontFamily:T.sans,fontSize:13,fontWeight:700,cursor:p.locked?"pointer":"default"}}>Reset PIN</button>
+              <button onClick={()=>setConfirm(p.slug)} style={{padding:"9px 14px",borderRadius:9,border:"1px solid "+T.line,background:"transparent",color:T.rose,fontFamily:T.sans,fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete</button>
+            </div>}
+          </div>)}
+      </div>
+      <div style={{fontFamily:T.sans,fontSize:12,color:T.faint,marginTop:12}}>“Reset PIN” removes that person's PIN and privacy so they can set a new one next time they open their name.</div>
+      <button onClick={onClose} style={doneBtn}>Done</button>
+    </div>}
   </div></div>;
 }
 
@@ -415,26 +719,49 @@ const rowStyle={display:"flex",alignItems:"center",gap:12,background:T.surface,b
 const delBtn={width:28,height:28,borderRadius:8,border:"none",background:T.surface2,color:T.faint,fontSize:18,lineHeight:"1",cursor:"pointer",flexShrink:0};
 const gearBtn={width:42,height:42,borderRadius:12,border:"1px solid "+T.line,background:T.surface,color:T.muted,fontSize:18,cursor:"pointer"};
 const sheetWrap={position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:50};
-const sheetBody={width:"100%",maxWidth:440,background:T.surface,borderTopLeftRadius:24,borderTopRightRadius:24,border:"1px solid "+T.line,padding:"22px 20px 34px"};
+const sheetBody={width:"100%",maxWidth:440,background:T.surface,borderTopLeftRadius:24,borderTopRightRadius:24,border:"1px solid "+T.line,padding:"22px 20px 34px",maxHeight:"88vh",overflowY:"auto"};
 const grab={width:40,height:4,background:T.line,borderRadius:999,margin:"0 auto 20px"};
 const doneBtn={width:"100%",marginTop:18,padding:13,borderRadius:14,border:"none",background:T.text,color:T.bg,fontFamily:T.sans,fontSize:16,fontWeight:700,cursor:"pointer"};
+const ghostBtn={flex:1,padding:12,borderRadius:12,border:"1px solid "+T.line,background:"transparent",color:T.muted,fontFamily:T.sans,fontSize:14,fontWeight:600,cursor:"pointer"};
+const primaryBtn={flex:1,padding:12,borderRadius:12,border:"none",background:T.mint,color:T.bg,fontFamily:T.sans,fontSize:14,fontWeight:700,cursor:"pointer"};
 function IconBtn({children,onClick}){ return <button onClick={onClick} style={{width:32,height:32,borderRadius:10,border:"1px solid "+T.line,background:T.surface,color:T.text,fontSize:20,lineHeight:"1",cursor:"pointer"}}>{children}</button>; }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
 </script>
 <script>
 (function(){
-  try {
-    var src = document.getElementById("app-source").textContent;
-    var out = Babel.transform(src, { presets: [["react", { runtime: "classic" }]] }).code;
-    (0, eval)(out);
-  } catch (e) {
-    console.error(e);
-    document.getElementById("root").innerHTML =
-      '<pre style="color:#FB7185;background:#0E1013;font-family:monospace;padding:24px;white-space:pre-wrap;font-size:13px">App failed to start:\n\n' +
-      String(e && e.message ? e.message : e) +
-      '\n\n(If this mentions a script/network error, the page needs internet to load React from the CDN.)</pre>';
+  var root = document.getElementById("root");
+  function fail(m){ root.innerHTML =
+    '<div style="color:#F4F5F7;background:#0E1013;font-family:-apple-system,system-ui,sans-serif;padding:32px 24px;text-align:center;min-height:100vh;box-sizing:border-box">'
+    + '<div style="font-size:40px;margin-bottom:12px">📡</div>'
+    + '<div style="font-size:18px;font-weight:700;margin-bottom:8px">Couldn\'t load the app</div>'
+    + '<div style="font-size:14px;color:#8B909C;line-height:1.5;max-width:320px;margin:0 auto">'
+    + m + '</div>'
+    + '<button onclick="location.reload()" style="margin-top:20px;padding:12px 22px;border:none;border-radius:12px;background:#5EEAD4;color:#0E1013;font-weight:700;font-size:15px;cursor:pointer">Try again</button>'
+    + '</div>'; }
+
+  function start(){
+    if (typeof Babel === "undefined" || typeof React === "undefined" || typeof ReactDOM === "undefined") {
+      fail("This app needs an internet connection to load. Check your WiFi or mobile data, then tap Try again. If you're on office/school WiFi, it may be blocking part of the app — try mobile data.");
+      return;
+    }
+    try {
+      var src = document.getElementById("app-source").textContent;
+      var out = Babel.transform(src, { presets: [["react", { runtime: "classic" }]] }).code;
+      (0, eval)(out);
+    } catch (e) {
+      console.error(e);
+      fail("Something went wrong starting the app: " + String(e && e.message ? e.message : e));
+    }
   }
+
+  // wait until scripts are ready (up to ~8s), then start or show a clear message
+  var tries = 0;
+  (function waitReady(){
+    if (typeof Babel !== "undefined" && typeof React !== "undefined" && typeof ReactDOM !== "undefined") { start(); return; }
+    if (tries++ > 80) { start(); return; } // will show the connection message
+    setTimeout(waitReady, 100);
+  })();
 })();
 </script>
 </body>
