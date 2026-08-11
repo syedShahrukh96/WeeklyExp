@@ -27,7 +27,7 @@
 <script type="text/plain" id="app-source">
 const { useState, useEffect, useMemo } = React;
 
-const APP_VERSION = "1.3.2";
+const APP_VERSION = "1.4.0";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBaImgKdKXWSr8mwPLfsSkB-oTvCQz7Lls",
@@ -100,10 +100,20 @@ const T = {
   sans:"-apple-system,BlinkMacSystemFont,'SF Pro',system-ui,sans-serif",
 };
 const CATEGORIES = [
-  {id:"food",label:"Food",icon:"🍜"},{id:"transport",label:"Transport",icon:"🚕"},
-  {id:"shopping",label:"Shopping",icon:"🛍️"},{id:"bills",label:"Bills",icon:"🧾"},
-  {id:"fun",label:"Fun",icon:"🎬"},{id:"health",label:"Health",icon:"💊"},{id:"other",label:"Other",icon:"•"},
+  {id:"food",label:"Food",icon:"🍜"},{id:"teacoffee",label:"Tea/Coffee",icon:"☕"},
+  {id:"panipuri",label:"Pani Puri",icon:"🥟"},{id:"transport",label:"Transport",icon:"🚕"},
+  {id:"fuel",label:"Fuel",icon:"⛽"},{id:"flight",label:"Flight",icon:"✈️"},
+  {id:"train",label:"Train",icon:"🚆"},{id:"trip",label:"Trip",icon:"🏝️"},
+  {id:"swiggy",label:"Swiggy",icon:"🛵"},{id:"zomato",label:"Zomato",icon:"🍽️"},
+  {id:"blinkit",label:"Blinkit",icon:"🛒"},{id:"shopping",label:"Shopping",icon:"🛍️"},
+  {id:"bills",label:"Bills",icon:"🧾"},{id:"fun",label:"Fun",icon:"🎬"},
+  {id:"health",label:"Health",icon:"💊"},{id:"other",label:"Other",icon:"•"},
 ];
+const PAYMENTS = [
+  {id:"cash",label:"Cash",icon:"💵"},{id:"upi",label:"UPI",icon:"📲"},
+  {id:"credit",label:"Credit",icon:"💳"},{id:"debit",label:"Debit",icon:"🏦"},
+];
+const payOf = (id) => PAYMENTS.find(p=>p.id===id) || PAYMENTS[0];
 const CURRENCIES = ["$","₹","€","£","Rp","₨","₦","¥","৳"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
@@ -134,6 +144,18 @@ function App(){
   const [pinError,setPinError] = useState("");
   const [showAdmin,setShowAdmin] = useState(false);
 
+  // follow the real calendar: jump to today's month & week on focus/visibility
+  useEffect(()=>{
+    function syncToday(){
+      const t=new Date();
+      setMKey(monthKey(t));
+      setWeek(Math.min(Math.ceil(t.getDate()/7),6));
+    }
+    window.addEventListener("focus", syncToday);
+    document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) syncToday(); });
+    return ()=>{ window.removeEventListener("focus", syncToday); };
+  },[]);
+
   async function saveConfigMerge(patch){ const next=Object.assign({},config,patch); setConfig(next); await store.setConfig(next); }
   // admin: reset a person's pins / privacy (does not reveal their data)
   async function adminResetPerson(slug){
@@ -156,7 +178,7 @@ function App(){
   function finalizeJoin(slug, p, name){
     (async()=>{
       let doc = p;
-      if(!doc){ doc = { name:name.trim(), publicName:"", locked:false, pinHash:null, viewPinHash:null, data:{} }; await store.setPerson(slug,doc); }
+      if(!doc){ doc = { name:name.trim(), publicName:"", currency:config.currency||"$", locked:false, pinHash:null, viewPinHash:null, data:{} }; await store.setPerson(slug,doc); }
       localStorage.setItem("wb-me", slug);
       setMe(slug); setPerson(doc); setPending(null); setPinError("");
       setMKey(monthKey(new Date())); setWeek(Math.min(Math.ceil(new Date().getDate()/7),6));
@@ -225,7 +247,7 @@ function App(){
     config={config} onOpenAdmin={()=>setShowAdmin(true)} adminSheet={showAdmin} onCloseAdmin={()=>setShowAdmin(false)}
     onSaveAdminPin={h=>saveConfigMerge({adminHash:h})} onAdminReset={adminResetPerson} onAdminDelete={adminDeletePerson} />;
 
-  const cur = config.currency;
+  const cur = person.currency || config.currency || "$";
   const md = parseMonthKey(mKey);
   const nWeeks = weeksInMonth(mKey);
   const ringColor = frac>=1 ? T.rose : (remaining/weekData.budget<=0.2 ? T.amber : T.mint);
@@ -291,7 +313,7 @@ function App(){
                   <div style={{width:40,height:40,borderRadius:12,background:T.surface2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{c.icon}</div>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontFamily:T.sans,fontSize:15,fontWeight:600,color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{e.note||c.label}</div>
-                    <div style={{fontFamily:T.sans,fontSize:12,color:T.faint}}>{c.label}</div>
+                    <div style={{fontFamily:T.sans,fontSize:12,color:T.faint}}>{c.label} · {payOf(e.pay).icon} {payOf(e.pay).label}</div>
                   </div>
                   <div style={{fontFamily:T.mono,fontSize:15,fontWeight:700,color:T.text,marginRight:4}}>{cur}{fmt(e.amount)}</div>
                   <button onClick={()=>removeExpense(e.id)} style={delBtn}>×</button>
@@ -300,11 +322,14 @@ function App(){
           }
         </div>
 
+        <PaymentBreakdown expenses={weekData.expenses} cur={cur} />
+
         <MonthOverview person={person} mKey={mKey} nWeeks={nWeeks} cur={cur} defaultBudget={config.defaultBudget} onJump={setWeek} selected={week} />
+        <LastMonthCard person={person} mKey={mKey} cur={cur} defaultBudget={config.defaultBudget} />
         <div style={{marginTop:20,fontFamily:T.mono,fontSize:10,color:T.faint,textAlign:"center"}}>v{APP_VERSION}</div>
       </div>
 
-      {showSettings && <Settings config={config} onClose={()=>setShowSettings(false)} onCurrency={c=>saveConfig(Object.assign({},config,{currency:c}))} onDefault={v=>saveConfig(Object.assign({},config,{defaultBudget:v}))} />}
+      {showSettings && <Settings person={person} config={config} onClose={()=>setShowSettings(false)} onCurrency={c=>commitPerson(Object.assign({},person,{currency:c}))} onDefault={v=>saveConfig(Object.assign({},config,{defaultBudget:v}))} />}
       {showPrivacy && <PrivacySheet person={person} onClose={()=>setShowPrivacy(false)} onUpdate={updateMeta} onDeleteMe={()=>{ setShowPrivacy(false); deletePerson(me); }} />}
       {showEveryone && <EveryoneSheet people={allPeople} mKey={mKey} week={week} cur={cur} defaultBudget={config.defaultBudget} meSlug={me} onDelete={deletePerson} onClose={()=>setShowEveryone(false)} />}
     </div>
@@ -487,7 +512,7 @@ function EveryoneSheet({people,mKey,week,cur,defaultBudget,meSlug,onDelete,onClo
     const spent = ((w&&w.expenses)||[]).reduce((s,e)=>s+e.amount,0);
     let mSpent=0; const mm=(p.data&&p.data[mKey])||{};
     Object.keys(mm).forEach(k=>{((mm[k].expenses)||[]).forEach(e=>mSpent+=e.amount);});
-    return {slug:p.slug,name:p.name,locked:!!p.locked,publicName:p.publicName,pinHash:p.pinHash,viewPinHash:p.viewPinHash,budget,spent,mSpent,data:p.data};
+    return {slug:p.slug,name:p.name,locked:!!p.locked,publicName:p.publicName,pinHash:p.pinHash,viewPinHash:p.viewPinHash,rcur:(p.currency||cur),budget,spent,mSpent,data:p.data};
   });
   rows.sort((a,b)=>b.spent-a.spent);
 
@@ -507,7 +532,7 @@ function EveryoneSheet({people,mKey,week,cur,defaultBudget,meSlug,onDelete,onClo
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,gap:8}}>
             <span style={{fontFamily:T.sans,fontSize:14,fontWeight:700,color:T.text,display:"flex",alignItems:"center",gap:6}}>{label} {r.locked && <span style={{fontSize:11}}>🔒</span>}</span>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
-              {shown ? <span style={{fontFamily:T.mono,fontSize:13,color:over?T.rose:T.mint}}>{rem<0?"-":""}{cur}{fmt(Math.abs(rem))} left</span>
+              {shown ? <span style={{fontFamily:T.mono,fontSize:13,color:over?T.rose:T.mint}}>{rem<0?"-":""}{r.rcur}{fmt(Math.abs(rem))} left</span>
                      : <button onClick={()=>{setUnlockSlug(r.slug);setPinErr("");}} style={{padding:"5px 12px",borderRadius:999,border:"1px solid "+T.line,background:"transparent",color:T.mint,fontFamily:T.sans,fontSize:12,fontWeight:700,cursor:"pointer"}}>Enter PIN</button>}
               {canDelete && <button onClick={()=>setConfirmSlug(r.slug)} title="Remove" style={{width:26,height:26,borderRadius:8,border:"none",background:T.surface2,color:T.faint,fontSize:14,lineHeight:"1",cursor:"pointer",flexShrink:0}}>🗑</button>}
             </div>
@@ -515,8 +540,8 @@ function EveryoneSheet({people,mKey,week,cur,defaultBudget,meSlug,onDelete,onClo
           {shown ? <>
             <div style={{height:6,background:T.surface2,borderRadius:999,overflow:"hidden"}}><div style={{width:(frac*100)+"%",height:"100%",background:bar,borderRadius:999}}/></div>
             <div style={{display:"flex",justifyContent:"space-between",marginTop:6}}>
-              <span style={{fontFamily:T.mono,fontSize:11,color:T.faint}}>Week: {cur}{fmt(r.spent)} / {cur}{fmt(r.budget)}</span>
-              <span style={{fontFamily:T.mono,fontSize:11,color:T.faint}}>Month: {cur}{fmt(r.mSpent)}</span>
+              <span style={{fontFamily:T.mono,fontSize:11,color:T.faint}}>Week: {r.rcur}{fmt(r.spent)} / {r.rcur}{fmt(r.budget)}</span>
+              <span style={{fontFamily:T.mono,fontSize:11,color:T.faint}}>Month: {r.rcur}{fmt(r.mSpent)}</span>
             </div>
             {level==="view" && <div style={{fontFamily:T.sans,fontSize:11,color:T.faint,marginTop:6}}>View-only — you can see but not edit or delete.</div>}
           </> : <div style={{fontFamily:T.sans,fontSize:12,color:T.faint}}>Private. Enter this person's PIN to view.</div>}
@@ -655,8 +680,8 @@ function BudgetEditor({cur,value,onSave}){
     <div style={{fontFamily:T.mono,fontSize:17,fontWeight:700,color:T.mint,marginTop:3}}>{cur}{fmt(value)}</div></button>;
 }
 function AddExpense({cur,onAdd}){
-  const [amount,setAmount]=useState(""); const [note,setNote]=useState(""); const [cat,setCat]=useState("food");
-  function submit(){ const n=Number(amount); if(!n||n<=0) return; onAdd({id:uid(),amount:n,note:note.trim(),category:cat,date:new Date().toISOString()}); setAmount(""); setNote(""); }
+  const [amount,setAmount]=useState(""); const [note,setNote]=useState(""); const [cat,setCat]=useState("food"); const [pay,setPay]=useState("upi");
+  function submit(){ const n=Number(amount); if(!n||n<=0) return; onAdd({id:uid(),amount:n,note:note.trim(),category:cat,pay:pay,date:new Date().toISOString()}); setAmount(""); setNote(""); }
   return <div style={{background:T.surface,border:"1px solid "+T.line,borderRadius:20,padding:16}}>
     <div style={{display:"flex",gap:10}}>
       <div style={{position:"relative",flex:"0 0 42%"}}>
@@ -671,9 +696,51 @@ function AddExpense({cur,onAdd}){
       {CATEGORIES.map(c=>{ const on=c.id===cat;
         return <button key={c.id} onClick={()=>setCat(c.id)} style={{flex:"0 0 auto",padding:"7px 12px",borderRadius:999,border:"1px solid "+(on?T.mint:T.line),background:on?"rgba(94,234,212,0.12)":"transparent",color:on?T.mint:T.muted,fontFamily:T.sans,fontSize:13,fontWeight:600,cursor:"pointer"}}>{c.icon} {c.label}</button>;})}
     </div>
+    <div style={{display:"flex",gap:7,overflowX:"auto",marginTop:8,paddingBottom:2}}>
+      {PAYMENTS.map(pp=>{ const on=pp.id===pay;
+        return <button key={pp.id} onClick={()=>setPay(pp.id)} style={{flex:"0 0 auto",padding:"7px 12px",borderRadius:999,border:"1px solid "+(on?T.amber:T.line),background:on?"rgba(251,191,36,0.12)":"transparent",color:on?T.amber:T.muted,fontFamily:T.sans,fontSize:13,fontWeight:600,cursor:"pointer"}}>{pp.icon} {pp.label}</button>;})}
+    </div>
     <button onClick={submit} disabled={!amount} style={{width:"100%",marginTop:12,padding:13,borderRadius:14,border:"none",background:amount?T.mint:T.surface2,color:amount?T.bg:T.faint,fontFamily:T.sans,fontSize:16,fontWeight:700,cursor:amount?"pointer":"default"}}>Add expense</button>
   </div>;
 }
+function PaymentBreakdown({expenses,cur}){
+  if(!expenses || expenses.length===0) return null;
+  const tot={}; let sum=0;
+  expenses.forEach(e=>{ const k=e.pay||"cash"; tot[k]=(tot[k]||0)+e.amount; sum+=e.amount; });
+  const items = PAYMENTS.filter(p=>tot[p.id]);
+  if(items.length===0) return null;
+  return <div style={{marginTop:14,background:T.surface,border:"1px solid "+T.line,borderRadius:16,padding:"12px 14px"}}>
+    <div style={{fontFamily:T.sans,fontSize:13,fontWeight:700,color:T.text,marginBottom:10}}>How you paid this week</div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {items.map(p=>{ const v=tot[p.id]; const pct=sum>0?Math.round(v/sum*100):0;
+        return <div key={p.id}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{fontFamily:T.sans,fontSize:13,color:T.muted}}>{p.icon} {p.label}</span>
+            <span style={{fontFamily:T.mono,fontSize:13,color:T.text}}>{cur}{fmt(v)} <span style={{color:T.faint}}>· {pct}%</span></span>
+          </div>
+          <div style={{height:5,background:T.surface2,borderRadius:999,overflow:"hidden"}}><div style={{width:pct+"%",height:"100%",background:T.amber,borderRadius:999}}/></div>
+        </div>;})}
+    </div>
+  </div>;
+}
+
+function LastMonthCard({person,mKey,cur,defaultBudget}){
+  const d=parseMonthKey(mKey); d.setMonth(d.getMonth()-1);
+  const prevKey=monthKey(d);
+  const mm=(person.data&&person.data[prevKey])||{};
+  const weeks=Object.keys(mm);
+  if(weeks.length===0) return null;
+  let spent=0; weeks.forEach(k=>{((mm[k].expenses)||[]).forEach(e=>spent+=e.amount);});
+  return <div style={{marginTop:14,display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 16px",background:T.surface,border:"1px solid "+T.line,borderRadius:14}}>
+    <div>
+      <div style={{fontFamily:T.sans,fontSize:13,fontWeight:700,color:T.text}}>Last month ({MONTHS[d.getMonth()]} {d.getFullYear()})</div>
+      <div style={{fontFamily:T.sans,fontSize:12,color:T.faint}}>Total of all weeks</div>
+    </div>
+    <div style={{fontFamily:T.mono,fontSize:16,fontWeight:700,color:T.mint}}>{cur}{fmt(spent)}</div>
+  </div>;
+}
+
+
 function MonthOverview({person,mKey,nWeeks,cur,defaultBudget,onJump,selected}){
   const m=(person.data&&person.data[mKey])||{}; let totalSpent=0,totalBudget=0;
   const rows=Array.from({length:nWeeks},(_,i)=>i+1).map(w=>{ const wd=m[w]||{}; const budget=wd.budget!=null?wd.budget:defaultBudget; const spent=(wd.expenses||[]).reduce((s,e)=>s+e.amount,0); totalSpent+=spent; totalBudget+=budget; return {w,budget,spent}; });
@@ -695,14 +762,15 @@ function MonthOverview({person,mKey,nWeeks,cur,defaultBudget,onJump,selected}){
     </div>
   </div>;
 }
-function Settings({config,onClose,onCurrency,onDefault}){
+function Settings({person,config,onClose,onCurrency,onDefault}){
   const [def,setDef]=useState(String(config.defaultBudget));
+  const myCur = person.currency || config.currency || "$";
   return <div onClick={onClose} style={sheetWrap}><div onClick={e=>e.stopPropagation()} style={sheetBody}>
     <div style={grab}/>
     <div style={{fontFamily:T.sans,fontSize:18,fontWeight:700,color:T.text,marginBottom:20}}>Settings</div>
-    <div style={{fontFamily:T.sans,fontSize:13,color:T.muted,marginBottom:8}}>Currency (shared by the whole group)</div>
+    <div style={{fontFamily:T.sans,fontSize:13,color:T.muted,marginBottom:8}}>Your currency (only affects your amounts)</div>
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:22}}>
-      {CURRENCIES.map(c=>{ const on=c===config.currency;
+      {CURRENCIES.map(c=>{ const on=c===myCur;
         return <button key={c} onClick={()=>onCurrency(c)} style={{width:46,height:46,borderRadius:12,border:"1px solid "+(on?T.mint:T.line),background:on?"rgba(94,234,212,0.12)":T.surface2,color:on?T.mint:T.text,fontFamily:T.mono,fontSize:17,fontWeight:700,cursor:"pointer"}}>{c}</button>;})}
     </div>
     <div style={{fontFamily:T.sans,fontSize:13,color:T.muted,marginBottom:8}}>Default weekly budget</div>
