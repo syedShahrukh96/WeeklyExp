@@ -27,7 +27,7 @@
 <script type="text/plain" id="app-source">
 const { useState, useEffect, useMemo } = React;
 
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.4.1";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBaImgKdKXWSr8mwPLfsSkB-oTvCQz7Lls",
@@ -124,7 +124,7 @@ const parseMonthKey = (k) => { const p=k.split("-").map(Number); return new Date
 const daysInMonth = (k) => { const d=parseMonthKey(k); return new Date(d.getFullYear(),d.getMonth()+1,0).getDate(); };
 const weeksInMonth = (k) => Math.ceil(daysInMonth(k)/7);
 const catOf = (id) => CATEGORIES.find(c=>c.id===id) || CATEGORIES[CATEGORIES.length-1];
-const fmt = (n) => new Intl.NumberFormat("en-US",{maximumFractionDigits:0}).format(Math.round(n));
+const fmt = (n) => new Intl.NumberFormat("en-US",{minimumFractionDigits:0, maximumFractionDigits:2}).format(Number(n)||0);
 const displayName = (p) => (p.locked && p.publicName) ? p.publicName : (p.locked ? "Hidden" : p.name);
 
 // =================================================================
@@ -214,7 +214,7 @@ function App(){
     return {budget: (w&&w.budget!=null)?w.budget:config.defaultBudget, expenses: (w&&w.expenses)||[]};
   },[person,mKey,week,config.defaultBudget]);
 
-  const spent = weekData.expenses.reduce((s,e)=>s+e.amount,0);
+  const spent = Math.round(weekData.expenses.reduce((s,e)=>s+e.amount,0)*100)/100;
   const remaining = weekData.budget - spent;
   const frac = weekData.budget>0 ? Math.min(spent/weekData.budget,1) : 0;
 
@@ -681,7 +681,7 @@ function BudgetEditor({cur,value,onSave}){
 }
 function AddExpense({cur,onAdd}){
   const [amount,setAmount]=useState(""); const [note,setNote]=useState(""); const [cat,setCat]=useState("food"); const [pay,setPay]=useState("upi");
-  function submit(){ const n=Number(amount); if(!n||n<=0) return; onAdd({id:uid(),amount:n,note:note.trim(),category:cat,pay:pay,date:new Date().toISOString()}); setAmount(""); setNote(""); }
+  function submit(){ const n=Math.round((Number(amount)||0)*100)/100; if(!n||n<=0) return; onAdd({id:uid(),amount:n,note:note.trim(),category:cat,pay:pay,date:new Date().toISOString()}); setAmount(""); setNote(""); }
   return <div style={{background:T.surface,border:"1px solid "+T.line,borderRadius:20,padding:16}}>
     <div style={{display:"flex",gap:10}}>
       <div style={{position:"relative",flex:"0 0 42%"}}>
